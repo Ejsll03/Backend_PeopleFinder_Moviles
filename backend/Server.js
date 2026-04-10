@@ -12,6 +12,7 @@ import friendRoutes from "./routes/friendRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import Chat from "./models/Chat.js";
 import Message from "./models/Message.js";
+import User from "./models/User.js";
 import { initGridFS, streamGridFSFile } from "./services/gridfs.js";
 import { createUserNotification } from "./services/notifications.js";
 
@@ -95,12 +96,17 @@ const io = new SocketIOServer(httpServer, {
 
 app.set("io", io);
 
+const userSocketCounts = new Map();
+
 io.use((socket, next) => {
   sessionMiddleware(socket.request, {}, next);
 });
 
 io.use((socket, next) => {
-  const userId = socket.request.session?.userId;
+  const userId =
+    socket.request.session?.userId ||
+    socket.handshake.auth?.userId ||
+    socket.handshake.query?.userId;
   if (!userId) {
     return next(new Error("No autenticado"));
   }
@@ -111,6 +117,20 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   socket.join(`user:${socket.userId}`);
 
+  const activeSockets = (userSocketCounts.get(socket.userId) || 0) + 1;
+  userSocketCounts.set(socket.userId, activeSockets);
+
+  User.findByIdAndUpdate(socket.userId, {
+    isOnline: true,
+    lastSeenAt: new Date(),
+  }).catch(() => {});
+
+  io.emit("user_presence_update", {
+    userId: socket.userId,
+    isOnline: true,
+    lastSeenAt: new Date().toISOString(),
+  });
+
   socket.on("join_chat", async ({ chatId }) => {
     const chat = await Chat.findOne({ _id: chatId, participants: socket.userId });
     if (chat) {
@@ -118,7 +138,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("send_message", async ({ chatId, text = "", imageUrl = "" }) => {
+  socket.on("send_message", async ({ chatId, text = "", imageUrl = "", clientMessageId = "" }) => {
     try {
       const chat = await Chat.findOne({ _id: chatId, participants: socket.userId });
       if (!chat) {
@@ -151,7 +171,13 @@ io.on("connection", (socket) => {
         "username fullName profileImage"
       );
 
-      io.to(`chat:${chat._id.toString()}`).emit("new_message", {
+      socket.emit("new_message", {
+        chatId: chat._id,
+        message: populatedMessage,
+        clientMessageId: clientMessageId || undefined,
+      });
+
+      socket.to(`chat:${chat._id.toString()}`).emit("new_message", {
         chatId: chat._id,
         message: populatedMessage,
       });
@@ -186,6 +212,68 @@ io.on("connection", (socket) => {
     } catch (error) {
       socket.emit("chat_error", { message: "No fue posible enviar mensaje" });
     }
+  });
+
+  socket.on("mark_chat_read", async ({ chatId }) => {
+    try {
+      const chat = await Chat.findOne({ _id: chatId, participants: socket.userId });
+      if (!chat) {
+        return;
+      }
+
+      const unreadMessages = await Message.find({
+        chat: chat._id,
+        sender: { $ne: socket.userId },
+        readBy: { $ne: socket.userId },
+      }).select("_id");
+
+      if (!unreadMessages.length) {
+        return;
+      }
+
+      const messageIds = unreadMessages.map((msg) => msg._id.toString());
+
+      await Message.updateMany(
+        { _id: { $in: unreadMessages.map((msg) => msg._id) } },
+        { $addToSet: { readBy: socket.userId } }
+      );
+
+      const payload = {
+        chatId: chat._id.toString(),
+        readerId: socket.userId.toString(),
+        messageIds,
+      };
+
+      io.to(`chat:${chat._id.toString()}`).emit("chat_read", payload);
+      chat.participants.forEach((participantId) => {
+        io.to(`user:${participantId.toString()}`).emit("chat_read", payload);
+      });
+    } catch (_error) {
+      // Ignorado: no interrumpimos la sesión de socket por errores de lectura.
+    }
+  });
+
+  socket.on("disconnect", () => {
+    const remaining = Math.max((userSocketCounts.get(socket.userId) || 1) - 1, 0);
+
+    if (remaining <= 0) {
+      userSocketCounts.delete(socket.userId);
+      const lastSeenAt = new Date();
+
+      User.findByIdAndUpdate(socket.userId, {
+        isOnline: false,
+        lastSeenAt,
+      }).catch(() => {});
+
+      io.emit("user_presence_update", {
+        userId: socket.userId,
+        isOnline: false,
+        lastSeenAt: lastSeenAt.toISOString(),
+      });
+      return;
+    }
+
+    userSocketCounts.set(socket.userId, remaining);
   });
 });
 

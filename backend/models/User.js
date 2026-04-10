@@ -41,6 +41,8 @@ const userSchema = new mongoose.Schema(
       showLastSeen: { type: Boolean, default: true },
     },
     profileImage: { type: String, default: "" },
+    isOnline: { type: Boolean, default: false },
+    lastSeenAt: { type: Date, default: Date.now },
     friends: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   },
   { timestamps: true }

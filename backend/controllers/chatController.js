@@ -15,9 +15,28 @@ export async function listChats(req, res) {
   try {
     const chats = await Chat.find({ participants: req.user._id })
       .sort({ lastMessageAt: -1 })
-      .populate("participants", "username fullName profileImage");
+      .populate(
+        "participants",
+        "username fullName profileImage privacySettings isOnline lastSeenAt"
+      );
 
-    res.json(chats);
+    const chatsWithUnread = await Promise.all(
+      chats.map(async (chat) => {
+        const unreadCount = await Message.countDocuments({
+          chat: chat._id,
+          sender: { $ne: req.user._id },
+          readBy: { $ne: req.user._id },
+        });
+
+        const plain = chat.toObject();
+        return {
+          ...plain,
+          unreadCount,
+        };
+      })
+    );
+
+    res.json(chatsWithUnread);
   } catch (error) {
     res.status(500).json({ error: "No fue posible obtener chats" });
   }
@@ -55,11 +74,17 @@ export async function createChat(req, res) {
 
     let chat = await Chat.findOne({
       participants: { $all: [req.user._id, friendId], $size: 2 },
-    }).populate("participants", "username fullName profileImage");
+    }).populate(
+      "participants",
+      "username fullName profileImage privacySettings isOnline lastSeenAt"
+    );
 
     if (!chat) {
       chat = await Chat.create({ participants: [req.user._id, friendId] });
-      chat = await chat.populate("participants", "username fullName profileImage");
+      chat = await chat.populate(
+        "participants",
+        "username fullName profileImage privacySettings isOnline lastSeenAt"
+      );
     }
 
     res.status(201).json(chat);
@@ -186,10 +211,39 @@ export async function markChatAsRead(req, res) {
       return res.status(404).json({ error: "Chat no encontrado" });
     }
 
-    await Message.updateMany(
-      { chat: chat._id, readBy: { $ne: req.user._id } },
-      { $addToSet: { readBy: req.user._id } }
-    );
+    const unreadMessages = await Message.find({
+      chat: chat._id,
+      sender: { $ne: req.user._id },
+      readBy: { $ne: req.user._id },
+    }).select("_id");
+
+    if (unreadMessages.length > 0) {
+      await Message.updateMany(
+        { _id: { $in: unreadMessages.map((msg) => msg._id) } },
+        { $addToSet: { readBy: req.user._id } }
+      );
+
+      const io = req.app.get("io");
+      if (io) {
+        const chatId = chat._id.toString();
+        const readerId = req.user._id.toString();
+        const messageIds = unreadMessages.map((msg) => msg._id.toString());
+
+        io.to(`chat:${chatId}`).emit("chat_read", {
+          chatId,
+          readerId,
+          messageIds,
+        });
+
+        chat.participants.forEach((participantId) => {
+          io.to(`user:${participantId.toString()}`).emit("chat_read", {
+            chatId,
+            readerId,
+            messageIds,
+          });
+        });
+      }
+    }
 
     res.json({ message: "Mensajes marcados como leidos" });
   } catch (error) {
