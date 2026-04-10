@@ -78,6 +78,17 @@ export const swipeFriend = async (req, res) => {
         incomingPending.status = "rejected";
         incomingPending.respondedAt = new Date();
         await incomingPending.save();
+
+        const io = req.app.get("io");
+        await createUserNotification({
+          recipientId: targetUserId,
+          actorId: currentUserId,
+          type: "system",
+          title: "Solicitud rechazada",
+          body: `${req.user.fullName || req.user.username} rechazó tu solicitud de amistad`,
+          data: { status: "rejected", userId: currentUserId.toString() },
+          io,
+        });
       }
 
       return res.json({ message: "Deslizado a la izquierda", status: "rejected" });
@@ -207,12 +218,40 @@ export const getFriends = async (req, res) => {
   try {
     const user = await User.findById(req.user._id).populate(
       "friends",
-      "username fullName profileImage bio"
+      "username fullName profileImage bio city interests privacySettings"
     );
 
     res.json(user?.friends || []);
   } catch (error) {
     res.status(500).json({ error: "No fue posible obtener amistades" });
+  }
+};
+
+export const getFriendDetail = async (req, res) => {
+  try {
+    const { friendId } = req.params;
+
+    const user = await User.findById(req.user._id).select("friends");
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const isFriend = (user.friends || []).some((id) => id.toString() === friendId);
+    if (!isFriend) {
+      return res.status(403).json({ error: "Solo puedes ver detalles de tus amistades" });
+    }
+
+    const friend = await User.findById(friendId).select(
+      "username fullName profileImage bio city interests privacySettings"
+    );
+
+    if (!friend) {
+      return res.status(404).json({ error: "Amigo no encontrado" });
+    }
+
+    return res.json(friend);
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible obtener el detalle del amigo" });
   }
 };
 
