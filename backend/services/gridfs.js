@@ -42,9 +42,16 @@ export function uploadBufferToGridFS(file, folder = "general") {
       },
     });
 
+    const uploadedFileId = uploadStream.id;
+
     uploadStream.on("error", reject);
-    uploadStream.on("finish", (storedFile) => {
-      resolve(`/media/${storedFile._id.toString()}`);
+    uploadStream.on("finish", () => {
+      if (!uploadedFileId) {
+        reject(new Error("No se pudo obtener el ID del archivo en GridFS"));
+        return;
+      }
+
+      resolve(`/media/${uploadedFileId.toString()}`);
     });
 
     uploadStream.end(file.buffer);

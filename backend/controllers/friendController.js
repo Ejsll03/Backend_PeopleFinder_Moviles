@@ -19,9 +19,20 @@ export const getDiscoverUsers = async (req, res) => {
 
     const users = await User.find({
       _id: { $nin: Array.from(blockedIds) },
-    }).select("username fullName bio profileImage");
+    }).select("username fullName bio profileImage city interests privacySettings");
 
-    res.json(users);
+    const visibleUsers = users.map((user) => {
+      const plain = user.toObject();
+      const showCity = plain?.privacySettings?.showCity !== false;
+
+      if (!showCity) {
+        plain.city = "";
+      }
+
+      return plain;
+    });
+
+    res.json(visibleUsers);
   } catch (error) {
     res.status(500).json({ error: "No fue posible obtener sugerencias" });
   }
@@ -69,6 +80,30 @@ export const swipeFriend = async (req, res) => {
       }
 
       return res.json({ message: "Deslizado a la izquierda", status: "rejected" });
+    }
+
+    const requestPermission =
+      targetUser?.privacySettings?.friendRequestPermission || "everyone";
+
+    if (!incomingPending && requestPermission === "nobody") {
+      return res.status(403).json({
+        error: "Este usuario no acepta solicitudes de amistad",
+      });
+    }
+
+    if (!incomingPending && requestPermission === "friends_of_friends") {
+      const currentFriendIds = new Set(
+        (req.user.friends || []).map((id) => id.toString())
+      );
+      const hasMutualFriend = (targetUser.friends || []).some((id) =>
+        currentFriendIds.has(id.toString())
+      );
+
+      if (!hasMutualFriend) {
+        return res.status(403).json({
+          error: "Este usuario solo acepta solicitudes de amigos de amigos",
+        });
+      }
     }
 
     if (incomingPending) {

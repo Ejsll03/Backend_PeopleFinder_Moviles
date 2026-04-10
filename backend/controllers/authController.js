@@ -1,17 +1,119 @@
 import User from "../models/User.js";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import {
   uploadBufferToGridFS,
   deleteGridFSFileByUrl,
 } from "../services/gridfs.js";
+import { sendEmailVerification } from "../services/mailer.js";
+
+function parseInterests(rawInterests) {
+  if (Array.isArray(rawInterests)) {
+    return rawInterests
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+  }
+
+  if (typeof rawInterests === "string") {
+    const trimmed = rawInterests.trim();
+    if (!trimmed) return [];
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .filter(Boolean);
+      }
+    } catch (_error) {
+      return trimmed
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
+const DEFAULT_PRIVACY_SETTINGS = {
+  profileVisibility: "public",
+  friendRequestPermission: "everyone",
+  messagePermission: "friends",
+  showCity: true,
+  showOnlineStatus: true,
+  showReadReceipts: true,
+  showLastSeen: true,
+};
+
+function normalizePrivacySettings(raw = {}) {
+  const profileVisibilityOptions = ["public", "friends", "private"];
+  const friendRequestOptions = ["everyone", "friends_of_friends", "nobody"];
+  const messageOptions = ["everyone", "friends"];
+
+  const settings = {
+    ...DEFAULT_PRIVACY_SETTINGS,
+    ...(raw || {}),
+  };
+
+  if (!profileVisibilityOptions.includes(settings.profileVisibility)) {
+    settings.profileVisibility = DEFAULT_PRIVACY_SETTINGS.profileVisibility;
+  }
+  if (!friendRequestOptions.includes(settings.friendRequestPermission)) {
+    settings.friendRequestPermission =
+      DEFAULT_PRIVACY_SETTINGS.friendRequestPermission;
+  }
+  if (!messageOptions.includes(settings.messagePermission)) {
+    settings.messagePermission = DEFAULT_PRIVACY_SETTINGS.messagePermission;
+  }
+
+  settings.showCity = Boolean(settings.showCity);
+  settings.showOnlineStatus = Boolean(settings.showOnlineStatus);
+  settings.showReadReceipts = Boolean(settings.showReadReceipts);
+  settings.showLastSeen = Boolean(settings.showLastSeen);
+
+  return settings;
+}
+
+function buildEmailVerificationPayload() {
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  return {
+    token,
+    tokenHash,
+    expires,
+  };
+}
+
+async function dispatchVerificationEmail(user, token) {
+  try {
+    await sendEmailVerification({
+      to: user.email,
+      fullName: user.fullName,
+      token,
+    });
+    return { sent: true };
+  } catch (error) {
+    console.error("No fue posible enviar el email de verificación:", error.message);
+    return { sent: false, error: error.message };
+  }
+}
 
 export const register = async (req, res) => {
   try {
-    const { username, email, password, fullName, bio = "" } = req.body;
+    const { username, email, password, fullName, city = "", bio = "", interests } = req.body;
 
     if (!username || !email || !password || !fullName) {
       return res.status(400).json({
         error: "username, email, password y fullName son requeridos",
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: "La imagen de perfil es obligatoria",
       });
     }
 
@@ -25,6 +127,7 @@ export const register = async (req, res) => {
     }
 
     const hashed = await bcrypt.hash(password, 10);
+    const verification = buildEmailVerificationPayload();
 
     const profileImage = await uploadBufferToGridFS(req.file, "profiles");
 
@@ -33,21 +136,36 @@ export const register = async (req, res) => {
       email: email.trim().toLowerCase(),
       password: hashed,
       fullName: fullName.trim(),
+      city: city?.trim() || "",
       bio: bio?.trim() || "",
+      interests: parseInterests(interests),
+      emailVerified: false,
+      emailVerificationToken: verification.tokenHash,
+      emailVerificationExpires: verification.expires,
+      privacySettings: DEFAULT_PRIVACY_SETTINGS,
       profileImage,
     });
     await user.save();
 
+    const verificationEmail = await dispatchVerificationEmail(user, verification.token);
+
     res.status(201).json({
-      message: "Usuario registrado con éxito",
+      message: verificationEmail.sent
+        ? "Usuario registrado. Revisa tu correo para verificar tu cuenta"
+        : "Usuario registrado. No se pudo enviar el correo de verificación",
       user: {
         id: user._id,
         username: user.username,
         email: user.email,
         fullName: user.fullName,
+        city: user.city,
         bio: user.bio,
+        interests: user.interests,
+        emailVerified: user.emailVerified,
+        privacySettings: normalizePrivacySettings(user.privacySettings),
         profileImage: user.profileImage,
       },
+      emailVerificationSent: verificationEmail.sent,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -82,7 +200,10 @@ export const login = async (req, res) => {
     req.session.username = user.username;
     req.session.email = user.email;
     req.session.fullName = user.fullName;
+    req.session.city = user.city;
     req.session.profileImage = user.profileImage;
+    req.session.emailVerified = user.emailVerified;
+    req.session.privacySettings = normalizePrivacySettings(user.privacySettings);
     req.session.isAuthenticated = true;
     req.session.loginTime = new Date().toISOString();
 
@@ -93,7 +214,11 @@ export const login = async (req, res) => {
         username: user.username,
         email: user.email,
         fullName: user.fullName,
+        city: user.city,
         bio: user.bio,
+        interests: user.interests,
+        emailVerified: user.emailVerified,
+        privacySettings: normalizePrivacySettings(user.privacySettings),
         profileImage: user.profileImage,
       },
       sessionID: req.sessionID
@@ -126,6 +251,9 @@ export const checkAuth = (req, res) => {
         username: req.session.username,
         email: req.session.email,
         fullName: req.session.fullName,
+        city: req.session.city,
+        emailVerified: Boolean(req.session.emailVerified),
+        privacySettings: normalizePrivacySettings(req.session.privacySettings),
         profileImage: req.session.profileImage,
       }
     });
@@ -182,6 +310,9 @@ export const sessionInfo = (req, res) => {
       username: req.session.username,
       email: req.session.email,
       fullName: req.session.fullName,
+      city: req.session.city,
+      emailVerified: Boolean(req.session.emailVerified),
+      privacySettings: normalizePrivacySettings(req.session.privacySettings),
       profileImage: req.session.profileImage,
     },
     sessionData: {
@@ -299,16 +430,32 @@ export const getProfile = async (req, res) => {
 // Actualizar perfil del usuario autenticado
 export const updateProfile = async (req, res) => {
   try {
-    const { username, email, password, fullName, bio } = req.body;
+    const { username, email, password, fullName, city, bio, interests } = req.body;
 
     const updates = {};
     if (username) updates.username = username.trim();
     if (email) updates.email = email.trim().toLowerCase();
     if (fullName) updates.fullName = fullName.trim();
+    if (typeof city === "string") updates.city = city.trim();
     if (typeof bio === "string") updates.bio = bio.trim();
-    const currentUser = await User.findById(req.session.userId).select("profileImage");
+    if (typeof interests !== "undefined") updates.interests = parseInterests(interests);
+    const currentUser = await User.findById(req.session.userId).select(
+      "profileImage email fullName"
+    );
     if (!currentUser) {
       return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    let shouldSendVerification = false;
+    let verificationToken;
+
+    if (updates.email && updates.email !== currentUser.email) {
+      const verification = buildEmailVerificationPayload();
+      updates.emailVerified = false;
+      updates.emailVerificationToken = verification.tokenHash;
+      updates.emailVerificationExpires = verification.expires;
+      shouldSendVerification = true;
+      verificationToken = verification.token;
     }
 
     if (req.file) {
@@ -340,11 +487,24 @@ export const updateProfile = async (req, res) => {
     req.session.username = user.username;
     req.session.email = user.email;
     req.session.fullName = user.fullName;
+    req.session.city = user.city;
+    req.session.emailVerified = user.emailVerified;
+    req.session.privacySettings = normalizePrivacySettings(user.privacySettings);
     req.session.profileImage = user.profileImage;
+
+    let verificationEmailSent = false;
+    if (shouldSendVerification) {
+      const verificationEmail = await dispatchVerificationEmail(
+        user,
+        verificationToken
+      );
+      verificationEmailSent = verificationEmail.sent;
+    }
 
     res.json({
       message: "Perfil actualizado con éxito",
       user,
+      emailVerificationSent: verificationEmailSent,
     });
   } catch (error) {
     console.error("Error al actualizar perfil:", error);
@@ -420,5 +580,119 @@ export const deleteProfileImage = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const getPrivacySettings = async (req, res) => {
+  try {
+    const user = await User.findById(req.session.userId).select("privacySettings");
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    return res.json({
+      privacySettings: normalizePrivacySettings(user.privacySettings),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible obtener la privacidad" });
+  }
+};
+
+export const updatePrivacySettings = async (req, res) => {
+  try {
+    const input = req.body?.privacySettings || req.body || {};
+    const normalized = normalizePrivacySettings(input);
+
+    const user = await User.findByIdAndUpdate(
+      req.session.userId,
+      { privacySettings: normalized },
+      { new: true, runValidators: true }
+    ).select("privacySettings");
+
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    req.session.privacySettings = normalizePrivacySettings(user.privacySettings);
+
+    return res.json({
+      message: "Privacidad actualizada",
+      privacySettings: normalizePrivacySettings(user.privacySettings),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible actualizar la privacidad" });
+  }
+};
+
+export const verifyEmailToken = async (req, res) => {
+  try {
+    const token = (req.query.token || req.body?.token || "").toString().trim();
+    if (!token) {
+      return res.status(400).json({ error: "Token de verificación requerido" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await User.findOne({
+      emailVerificationToken: tokenHash,
+      emailVerificationExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: "Token inválido o expirado" });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationToken = "";
+    user.emailVerificationExpires = undefined;
+    await user.save();
+
+    if (req.session?.userId?.toString() === user._id.toString()) {
+      req.session.emailVerified = true;
+    }
+
+    return res.json({
+      message: "Correo verificado correctamente",
+      user: {
+        id: user._id,
+        email: user.email,
+        emailVerified: user.emailVerified,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible verificar el correo" });
+  }
+};
+
+export const resendVerificationEmail = async (req, res) => {
+  try {
+    const user = await User.findById(req.session.userId);
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    if (user.emailVerified) {
+      return res.json({ message: "Tu correo ya está verificado", emailVerified: true });
+    }
+
+    const verification = buildEmailVerificationPayload();
+    user.emailVerificationToken = verification.tokenHash;
+    user.emailVerificationExpires = verification.expires;
+    await user.save();
+
+    const verificationEmail = await dispatchVerificationEmail(user, verification.token);
+
+    if (!verificationEmail.sent) {
+      return res.status(500).json({
+        error: "No se pudo reenviar el correo de verificación",
+      });
+    }
+
+    return res.json({
+      message: "Correo de verificación reenviado",
+      emailVerified: false,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible reenviar la verificación" });
   }
 };

@@ -12,6 +12,10 @@ import {
   updateProfile,
   deleteAccount,
   deleteProfileImage,
+  verifyEmailToken,
+  resendVerificationEmail,
+  getPrivacySettings,
+  updatePrivacySettings,
 } from "../controllers/authController.js";
 import { requireAuth } from "../middleware/auth.js";
 import { uploadProfileImage } from "../middleware/upload.js";
@@ -24,6 +28,11 @@ router.post("/login", login);
 router.post("/logout", logout);
 router.get("/check", checkAuth);
 router.post("/reset-password", resetPassword);
+router.get("/verify-email", verifyEmailToken);
+router.post("/verify-email", verifyEmailToken);
+router.post("/resend-verification", requireAuth, resendVerificationEmail);
+router.get("/privacy", requireAuth, getPrivacySettings);
+router.put("/privacy", requireAuth, updatePrivacySettings);
 
 // Rutas de información y debug de sesiones
 router.get("/session-info", sessionInfo);
