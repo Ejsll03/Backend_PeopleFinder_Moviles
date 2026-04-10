@@ -50,3 +50,35 @@ export async function sendEmailVerification({ to, fullName, token }) {
 
   return verificationUrl;
 }
+
+export async function sendPasswordResetEmail({ to, fullName, token }) {
+  const transportConfig = getTransportConfig();
+  if (!transportConfig) {
+    throw new Error("SMTP no configurado. Define SMTP_HOST, SMTP_PORT, SMTP_USER y SMTP_PASS");
+  }
+
+  const transporter = nodemailer.createTransport(transportConfig);
+  const appUrl = process.env.APP_BASE_URL || "http://localhost:5000";
+  const resetUrl = `${appUrl}/auth/reset-password/verify?token=${token}`;
+  const sender = process.env.SMTP_FROM || process.env.SMTP_USER;
+
+  await transporter.sendMail({
+    from: sender,
+    to,
+    subject: "Recupera tu contraseña en PeopleFinder",
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.45; color: #111;">
+        <h2>Hola ${fullName || "usuario"}</h2>
+        <p>Recibimos una solicitud para restablecer tu contraseña.</p>
+        <p>Tu token de recuperación es:</p>
+        <p style="font-size:18px; font-weight:700; letter-spacing:1px;">${token}</p>
+        <p>También puedes abrir este enlace:</p>
+        <p><a href="${resetUrl}">${resetUrl}</a></p>
+        <p>El token expira en 60 minutos.</p>
+      </div>
+    `,
+    text: `Hola ${fullName || "usuario"}. Tu token de recuperación es: ${token}. También puedes abrir ${resetUrl}. El token expira en 60 minutos.`,
+  });
+
+  return resetUrl;
+}

@@ -5,6 +5,8 @@ import {
   logout, 
   checkAuth, 
   resetPassword,
+  verifyResetToken,
+  confirmResetPassword,
   sessionInfo,
   debugSessions,
   sessionStats,
@@ -28,6 +30,8 @@ router.post("/login", login);
 router.post("/logout", logout);
 router.get("/check", checkAuth);
 router.post("/reset-password", resetPassword);
+router.get("/reset-password/verify", verifyResetToken);
+router.post("/reset-password/confirm", confirmResetPassword);
 router.get("/verify-email", verifyEmailToken);
 router.post("/verify-email", verifyEmailToken);
 router.post("/resend-verification", requireAuth, resendVerificationEmail);

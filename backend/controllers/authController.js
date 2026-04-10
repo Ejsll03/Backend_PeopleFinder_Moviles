@@ -5,7 +5,7 @@ import {
   uploadBufferToGridFS,
   deleteGridFSFileByUrl,
 } from "../services/gridfs.js";
-import { sendEmailVerification } from "../services/mailer.js";
+import { sendEmailVerification, sendPasswordResetEmail } from "../services/mailer.js";
 
 function parseInterests(rawInterests) {
   if (Array.isArray(rawInterests)) {
@@ -84,6 +84,18 @@ function buildEmailVerificationPayload() {
   const token = crypto.randomBytes(32).toString("hex");
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  return {
+    token,
+    tokenHash,
+    expires,
+  };
+}
+
+function buildPasswordResetPayload() {
+  const token = crypto.randomBytes(3).toString("hex").toUpperCase();
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const expires = new Date(Date.now() + 60 * 60 * 1000);
 
   return {
     token,
@@ -269,7 +281,7 @@ export const checkAuth = (req, res) => {
   }
 };
 
-// Endpoint para reset password (placeholder)
+// Endpoint para solicitar token de recuperación
 export const resetPassword = async (req, res) => {
   try {
     const { email } = req.body;
@@ -284,6 +296,17 @@ export const resetPassword = async (req, res) => {
         message: "Si el email existe, se han enviado las instrucciones" 
       });
     }
+
+    const resetPayload = buildPasswordResetPayload();
+    user.passwordResetToken = resetPayload.tokenHash;
+    user.passwordResetExpires = resetPayload.expires;
+    await user.save();
+
+    await sendPasswordResetEmail({
+      to: user.email,
+      fullName: user.fullName,
+      token: resetPayload.token,
+    });
     
     res.json({ 
       message: "Si el email existe, se han enviado las instrucciones"
@@ -291,6 +314,69 @@ export const resetPassword = async (req, res) => {
   } catch (err) {
     console.error("Error en reset password:", err);
     res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const verifyResetToken = async (req, res) => {
+  try {
+    const token = (req.query.token || req.body?.token || "").toString().trim().toUpperCase();
+    if (!token) {
+      return res.status(400).json({ error: "Token de recuperación requerido" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await User.findOne({
+      passwordResetToken: tokenHash,
+      passwordResetExpires: { $gt: new Date() },
+    }).select("_id");
+
+    if (!user) {
+      return res.status(400).json({ error: "Token inválido o expirado" });
+    }
+
+    return res.json({ message: "Token válido" });
+  } catch (error) {
+    console.error("Error al verificar token de recuperación:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const confirmResetPassword = async (req, res) => {
+  try {
+    const token = (req.body?.token || "").toString().trim().toUpperCase();
+    const newPassword = (req.body?.newPassword || "").toString();
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: "token y newPassword son requeridos" });
+    }
+
+    if (newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ error: "La nueva contraseña debe tener al menos 6 caracteres" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await User.findOne({
+      passwordResetToken: tokenHash,
+      passwordResetExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: "Token inválido o expirado" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.passwordResetToken = "";
+    user.passwordResetExpires = undefined;
+    await user.save();
+
+    return res.json({ message: "Contraseña actualizada correctamente" });
+  } catch (error) {
+    console.error("Error al confirmar recuperación de contraseña:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
   }
 };
 
@@ -699,5 +785,62 @@ export const resendVerificationEmail = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: "No fue posible reenviar la verificación" });
+  }
+};
+
+export const verifyResetToken = async (req, res) => {
+  try {
+    const token = (req.query.token || req.body?.token || "").toString().trim();
+    if (!token) {
+      return res.status(400).json({ error: "Token requerido" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const user = await User.findOne({
+      passwordResetToken: tokenHash,
+      passwordResetExpires: { $gt: new Date() },
+    }).select("_id");
+
+    if (!user) {
+      return res.status(400).json({ error: "Token inválido o expirado" });
+    }
+
+    return res.json({ valid: true });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible validar el token" });
+  }
+};
+
+export const confirmResetPassword = async (req, res) => {
+  try {
+    const token = (req.body?.token || "").toString().trim();
+    const newPassword = (req.body?.newPassword || "").toString();
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: "token y newPassword son requeridos" });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const user = await User.findOne({
+      passwordResetToken: tokenHash,
+      passwordResetExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: "Token inválido o expirado" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.passwordResetToken = "";
+    user.passwordResetExpires = undefined;
+    await user.save();
+
+    return res.json({ message: "Contraseña actualizada correctamente" });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible restablecer la contraseña" });
   }
 };
