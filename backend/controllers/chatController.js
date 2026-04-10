@@ -5,6 +5,7 @@ import {
   uploadBufferToGridFS,
   deleteGridFSFileByUrl,
 } from "../services/gridfs.js";
+import { createUserNotification } from "../services/notifications.js";
 
 async function ensureParticipant(chatId, userId) {
   return Chat.findOne({ _id: chatId, participants: userId });
@@ -105,6 +106,23 @@ export async function sendMessage(req, res) {
       req.app.get("io").to(`chat:${chat._id.toString()}`).emit("new_message", {
         chatId: chat._id,
         message: populatedMessage,
+      });
+    }
+
+    const otherParticipants = chat.participants
+      .map((id) => id.toString())
+      .filter((id) => id !== req.user._id.toString());
+
+    const io = req.app.get("io");
+    for (const recipientId of otherParticipants) {
+      await createUserNotification({
+        recipientId,
+        actorId: req.user._id,
+        type: "message",
+        title: "Nuevo mensaje",
+        body: `${req.user.fullName || req.user.username}: ${type === "image" ? "[Imagen]" : text}`,
+        data: { chatId: chat._id.toString() },
+        io,
       });
     }
 

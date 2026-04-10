@@ -28,6 +28,11 @@ const userSchema = new mongoose.Schema(
         enum: ["everyone", "friends"],
         default: "friends",
       },
+      appearanceMode: {
+        type: String,
+        enum: ["dark", "light"],
+        default: "dark",
+      },
       showCity: { type: Boolean, default: true },
       showOnlineStatus: { type: Boolean, default: true },
       showReadReceipts: { type: Boolean, default: true },

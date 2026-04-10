@@ -40,6 +40,7 @@ const DEFAULT_PRIVACY_SETTINGS = {
   profileVisibility: "public",
   friendRequestPermission: "everyone",
   messagePermission: "friends",
+  appearanceMode: "dark",
   showCity: true,
   showOnlineStatus: true,
   showReadReceipts: true,
@@ -50,6 +51,7 @@ function normalizePrivacySettings(raw = {}) {
   const profileVisibilityOptions = ["public", "friends", "private"];
   const friendRequestOptions = ["everyone", "friends_of_friends", "nobody"];
   const messageOptions = ["everyone", "friends"];
+  const appearanceOptions = ["dark", "light"];
 
   const settings = {
     ...DEFAULT_PRIVACY_SETTINGS,
@@ -65,6 +67,9 @@ function normalizePrivacySettings(raw = {}) {
   }
   if (!messageOptions.includes(settings.messagePermission)) {
     settings.messagePermission = DEFAULT_PRIVACY_SETTINGS.messagePermission;
+  }
+  if (!appearanceOptions.includes(settings.appearanceMode)) {
+    settings.appearanceMode = DEFAULT_PRIVACY_SETTINGS.appearanceMode;
   }
 
   settings.showCity = Boolean(settings.showCity);

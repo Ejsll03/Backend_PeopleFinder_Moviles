@@ -1,5 +1,6 @@
 import User from "../models/User.js";
 import FriendRequest from "../models/FriendRequest.js";
+import { createUserNotification } from "../services/notifications.js";
 
 export const getDiscoverUsers = async (req, res) => {
   try {
@@ -118,6 +119,32 @@ export const swipeFriend = async (req, res) => {
         $addToSet: { friends: currentUserId },
       });
 
+      const io = req.app.get("io");
+
+      await createUserNotification({
+        recipientId: currentUserId,
+        actorId: targetUserId,
+        type: "friend_match",
+        title: "Nueva amistad",
+        body: `Ahora eres amigo de ${targetUser.fullName || targetUser.username}`,
+        data: { userId: targetUser._id.toString() },
+        io,
+      });
+
+      const currentUser = await User.findById(currentUserId).select(
+        "username fullName"
+      );
+
+      await createUserNotification({
+        recipientId: targetUserId,
+        actorId: currentUserId,
+        type: "friend_match",
+        title: "Solicitud aceptada",
+        body: `${currentUser?.fullName || currentUser?.username || "Un usuario"} aceptó tu solicitud`,
+        data: { userId: currentUserId.toString() },
+        io,
+      });
+
       return res.json({
         message: "Amistad aceptada",
         status: "matched",
@@ -140,6 +167,17 @@ export const swipeFriend = async (req, res) => {
       await FriendRequest.create({
         requester: currentUserId,
         recipient: targetUserId,
+      });
+
+      const io = req.app.get("io");
+      await createUserNotification({
+        recipientId: targetUserId,
+        actorId: currentUserId,
+        type: "friend_request",
+        title: "Nueva solicitud de amistad",
+        body: `${req.user.fullName || req.user.username} quiere conectar contigo`,
+        data: { userId: currentUserId.toString() },
+        io,
       });
     }
 

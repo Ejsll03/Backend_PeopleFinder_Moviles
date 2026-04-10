@@ -9,9 +9,11 @@ import { Server as SocketIOServer } from "socket.io";
 import authRoutes from "./routes/authRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import friendRoutes from "./routes/friendRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
 import Chat from "./models/Chat.js";
 import Message from "./models/Message.js";
 import { initGridFS, streamGridFSFile } from "./services/gridfs.js";
+import { createUserNotification } from "./services/notifications.js";
 
 dotenv.config();
 const app = express();
@@ -59,6 +61,7 @@ app.use((req, res, next) => {
 app.use("/auth", authRoutes);
 app.use("/chats", chatRoutes);
 app.use("/friends", friendRoutes);
+app.use("/notifications", notificationRoutes);
 
 app.get("/media/:fileId", async (req, res) => {
   try {
@@ -160,6 +163,26 @@ io.on("connection", (socket) => {
           lastMessageAt: chat.lastMessageAt,
         });
       });
+
+      const senderName =
+        populatedMessage?.sender?.fullName ||
+        populatedMessage?.sender?.username ||
+        "Nuevo mensaje";
+      const recipients = chat.participants
+        .map((id) => id.toString())
+        .filter((id) => id !== socket.userId);
+
+      for (const recipientId of recipients) {
+        await createUserNotification({
+          recipientId,
+          actorId: socket.userId,
+          type: "message",
+          title: "Nuevo mensaje",
+          body: `${senderName}: ${cleanImage ? "[Imagen]" : cleanText}`,
+          data: { chatId: chat._id.toString() },
+          io,
+        });
+      }
     } catch (error) {
       socket.emit("chat_error", { message: "No fue posible enviar mensaje" });
     }
