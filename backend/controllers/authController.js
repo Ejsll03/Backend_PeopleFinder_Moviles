@@ -298,7 +298,8 @@ export const resetPassword = async (req, res) => {
       return res.status(400).json({ error: "Email es requerido" });
     }
 
-    const user = await User.findOne({ email });
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.json({ 
         message: "Si el email existe, se han enviado las instrucciones" 
@@ -310,11 +311,16 @@ export const resetPassword = async (req, res) => {
     user.passwordResetExpires = resetPayload.expires;
     await user.save();
 
-    await sendPasswordResetEmail({
-      to: user.email,
-      fullName: user.fullName,
-      token: resetPayload.token,
-    });
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        fullName: user.fullName,
+        token: resetPayload.token,
+      });
+    } catch (mailError) {
+      // No rompemos el flujo de recuperación si el proveedor SMTP falla.
+      console.error("No fue posible enviar el correo de recuperación:", mailError.message);
+    }
     
     res.json({ 
       message: "Si el email existe, se han enviado las instrucciones"
