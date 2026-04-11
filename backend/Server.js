@@ -58,6 +58,18 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get("/", (_req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL;
+  if (frontendUrl) {
+    return res.redirect(frontendUrl);
+  }
+
+  return res.status(200).json({
+    status: "ok",
+    message: "Backend activo. Define FRONTEND_URL para redirigir desde /."
+  });
+});
+
 // Rutas del negocio social
 app.use("/auth", authRoutes);
 app.use("/chats", chatRoutes);
