@@ -164,6 +164,14 @@ export const register = async (req, res) => {
     });
     await user.save();
 
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("discover:updated", {
+        reason: "new_user_registered",
+        userId: user._id.toString(),
+      });
+    }
+
     const verificationEmail = await dispatchVerificationEmail(user, verification.token);
 
     res.status(201).json({

@@ -5,6 +5,13 @@ import { createUserNotification } from "../services/notifications.js";
 export const getDiscoverUsers = async (req, res) => {
   try {
     const currentUser = req.user;
+    const normalizeInterest = (value = "") =>
+      String(value || "").trim().toLowerCase();
+    const currentInterestSet = new Set(
+      (Array.isArray(currentUser?.interests) ? currentUser.interests : [])
+        .map((item) => normalizeInterest(item))
+        .filter(Boolean)
+    );
 
     const pendingRequests = await FriendRequest.find({
       $or: [{ requester: currentUser._id }, { recipient: currentUser._id }],
@@ -20,20 +27,37 @@ export const getDiscoverUsers = async (req, res) => {
 
     const users = await User.find({
       _id: { $nin: Array.from(blockedIds) },
-    }).select("username fullName bio profileImage city interests privacySettings");
+    })
+      .sort({ createdAt: -1 })
+      .select("username fullName bio profileImage city interests privacySettings");
 
     const visibleUsers = users.map((user) => {
       const plain = user.toObject();
       const showCity = plain?.privacySettings?.showCity !== false;
+      const interests = Array.isArray(plain?.interests) ? plain.interests : [];
+      const sharedInterestsCount = interests.filter((item) =>
+        currentInterestSet.has(normalizeInterest(item))
+      ).length;
 
       if (!showCity) {
         plain.city = "";
       }
 
-      return plain;
+      return {
+        ...plain,
+        sharedInterestsCount,
+      };
     });
 
-    res.json(visibleUsers);
+    const sortedBySimilarity = [...visibleUsers].sort(
+      (a, b) => (b.sharedInterestsCount || 0) - (a.sharedInterestsCount || 0)
+    );
+
+    const withSharedInterests = sortedBySimilarity.filter(
+      (item) => (item.sharedInterestsCount || 0) > 0
+    );
+
+    res.json(withSharedInterests.length > 0 ? withSharedInterests : sortedBySimilarity);
   } catch (error) {
     res.status(500).json({ error: "No fue posible obtener sugerencias" });
   }
