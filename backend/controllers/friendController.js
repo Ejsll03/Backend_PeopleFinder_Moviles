@@ -13,14 +13,19 @@ export const getDiscoverUsers = async (req, res) => {
         .filter(Boolean)
     );
 
-    const pendingRequests = await FriendRequest.find({
-      $or: [{ requester: currentUser._id }, { recipient: currentUser._id }],
-      status: "pending",
-    }).select("requester recipient");
+    const pendingOrRejectedByMeRequests = await FriendRequest.find({
+      $or: [
+        // Solicitudes pendientes en cualquier direccion.
+        { requester: currentUser._id, status: "pending" },
+        { recipient: currentUser._id, status: "pending" },
+        // Rechazos efectuados por el usuario actual.
+        { recipient: currentUser._id, status: "rejected" },
+      ],
+    }).select("requester recipient status");
 
     const blockedIds = new Set([currentUser._id.toString()]);
     currentUser.friends.forEach((id) => blockedIds.add(id.toString()));
-    pendingRequests.forEach((request) => {
+    pendingOrRejectedByMeRequests.forEach((request) => {
       blockedIds.add(request.requester.toString());
       blockedIds.add(request.recipient.toString());
     });
@@ -91,55 +96,42 @@ export const swipeFriend = async (req, res) => {
       return res.json({ message: "Ya son amigos", status: "friends" });
     }
 
-    const incomingPending = await FriendRequest.findOne({
+    const incomingRequest = await FriendRequest.findOne({
       requester: targetUserId,
       recipient: currentUserId,
-      status: "pending",
     });
+    const incomingPending = incomingRequest?.status === "pending" ? incomingRequest : null;
 
     if (direction === "left") {
-      if (incomingPending) {
-        incomingPending.status = "rejected";
-        incomingPending.respondedAt = new Date();
-        await incomingPending.save();
+      if (incomingRequest) {
+        if (incomingRequest.status !== "rejected") {
+          incomingRequest.status = "rejected";
+          incomingRequest.respondedAt = new Date();
+          await incomingRequest.save();
+        }
 
-        const io = req.app.get("io");
-        await createUserNotification({
-          recipientId: targetUserId,
-          actorId: currentUserId,
-          type: "system",
-          title: "Solicitud rechazada",
-          body: `${req.user.fullName || req.user.username} rechazó tu solicitud de amistad`,
-          data: { status: "rejected", userId: currentUserId.toString() },
-          io,
+        if (incomingPending) {
+          const io = req.app.get("io");
+          await createUserNotification({
+            recipientId: targetUserId,
+            actorId: currentUserId,
+            type: "system",
+            title: "Solicitud rechazada",
+            body: `${req.user.fullName || req.user.username} rechazó tu solicitud de amistad`,
+            data: { status: "rejected", userId: currentUserId.toString() },
+            io,
+          });
+        }
+      } else {
+        await FriendRequest.create({
+          requester: targetUserId,
+          recipient: currentUserId,
+          status: "rejected",
+          respondedAt: new Date(),
         });
       }
 
       return res.json({ message: "Deslizado a la izquierda", status: "rejected" });
-    }
-
-    const requestPermission =
-      targetUser?.privacySettings?.friendRequestPermission || "everyone";
-
-    if (!incomingPending && requestPermission === "nobody") {
-      return res.status(403).json({
-        error: "Este usuario no acepta solicitudes de amistad",
-      });
-    }
-
-    if (!incomingPending && requestPermission === "friends_of_friends") {
-      const currentFriendIds = new Set(
-        (req.user.friends || []).map((id) => id.toString())
-      );
-      const hasMutualFriend = (targetUser.friends || []).some((id) =>
-        currentFriendIds.has(id.toString())
-      );
-
-      if (!hasMutualFriend) {
-        return res.status(403).json({
-          error: "Este usuario solo acepta solicitudes de amigos de amigos",
-        });
-      }
     }
 
     if (incomingPending) {
@@ -195,14 +187,44 @@ export const swipeFriend = async (req, res) => {
     const existingOutgoing = await FriendRequest.findOne({
       requester: currentUserId,
       recipient: targetUserId,
-      status: "pending",
     });
 
-    if (!existingOutgoing) {
-      await FriendRequest.create({
-        requester: currentUserId,
-        recipient: targetUserId,
+    if (existingOutgoing?.status === "pending") {
+      return res.json({ message: "Solicitud ya enviada", status: "pending" });
+    }
+
+    if (existingOutgoing?.status === "accepted") {
+      return res.json({ message: "Ya son amigos", status: "friends" });
+    }
+
+    const requestPermission =
+      targetUser?.privacySettings?.friendRequestPermission || "everyone";
+
+    if (requestPermission === "nobody") {
+      return res.status(403).json({
+        error: "Este usuario no acepta solicitudes de amistad",
       });
+    }
+
+    if (requestPermission === "friends_of_friends") {
+      const currentFriendIds = new Set(
+        (req.user.friends || []).map((id) => id.toString())
+      );
+      const hasMutualFriend = (targetUser.friends || []).some((id) =>
+        currentFriendIds.has(id.toString())
+      );
+
+      if (!hasMutualFriend) {
+        return res.status(403).json({
+          error: "Este usuario solo acepta solicitudes de amigos de amigos",
+        });
+      }
+    }
+
+    if (existingOutgoing?.status === "rejected") {
+      existingOutgoing.status = "pending";
+      existingOutgoing.respondedAt = null;
+      await existingOutgoing.save();
 
       const io = req.app.get("io");
       await createUserNotification({
@@ -214,7 +236,25 @@ export const swipeFriend = async (req, res) => {
         data: { userId: currentUserId.toString() },
         io,
       });
+
+      return res.json({ message: "Solicitud reenviada", status: "pending" });
     }
+
+    await FriendRequest.create({
+      requester: currentUserId,
+      recipient: targetUserId,
+    });
+
+    const io = req.app.get("io");
+    await createUserNotification({
+      recipientId: targetUserId,
+      actorId: currentUserId,
+      type: "friend_request",
+      title: "Nueva solicitud de amistad",
+      body: `${req.user.fullName || req.user.username} quiere conectar contigo`,
+      data: { userId: currentUserId.toString() },
+      io,
+    });
 
     return res.json({ message: "Solicitud enviada", status: "pending" });
   } catch (error) {
@@ -235,6 +275,208 @@ export const getFriendRequests = async (req, res) => {
     res.json(requests);
   } catch (error) {
     res.status(500).json({ error: "No fue posible obtener solicitudes" });
+  }
+};
+
+export const getFriendRequestActivity = async (req, res) => {
+  try {
+    const currentUserId = req.user._id;
+
+    const [sentInvitations, rejectedByMe] = await Promise.all([
+      FriendRequest.find({
+        requester: currentUserId,
+        status: { $in: ["pending", "rejected"] },
+      })
+        .sort({ createdAt: -1 })
+        .populate("recipient", "username fullName profileImage"),
+      FriendRequest.find({
+        recipient: currentUserId,
+        status: "rejected",
+      })
+        .sort({ respondedAt: -1, createdAt: -1 })
+        .populate("requester", "username fullName profileImage"),
+    ]);
+
+    const sent = sentInvitations.map((request) => ({
+      id: request._id,
+      status: request.status,
+      createdAt: request.createdAt,
+      respondedAt: request.respondedAt,
+      user: request.recipient,
+    }));
+
+    const rejected = rejectedByMe.map((request) => ({
+      id: request._id,
+      status: request.status,
+      createdAt: request.createdAt,
+      respondedAt: request.respondedAt,
+      user: request.requester,
+    }));
+
+    return res.json({
+      sentInvitations: sent,
+      rejectedByMe: rejected,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible obtener la actividad de solicitudes" });
+  }
+};
+
+export const cancelSentFriendRequest = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const currentUserId = req.user._id;
+
+    const request = await FriendRequest.findOne({
+      _id: requestId,
+      requester: currentUserId,
+    });
+
+    if (!request) {
+      return res.status(404).json({ error: "Invitación no encontrada" });
+    }
+
+    if (request.status !== "pending") {
+      return res.status(409).json({ error: "Solo puedes cancelar invitaciones pendientes" });
+    }
+
+    await FriendRequest.deleteOne({ _id: request._id });
+    return res.json({ message: "Invitación cancelada" });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible cancelar la invitación" });
+  }
+};
+
+export const acceptRejectedRequest = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const currentUserId = req.user._id;
+
+    const rejectedRequest = await FriendRequest.findOne({
+      _id: requestId,
+      recipient: currentUserId,
+      status: "rejected",
+    });
+
+    if (!rejectedRequest) {
+      return res.status(404).json({ error: "Rechazo no encontrado" });
+    }
+
+    const targetUserId = rejectedRequest.requester;
+    const targetUser = await User.findById(targetUserId).select(
+      "username fullName profileImage friends privacySettings"
+    );
+
+    if (!targetUser) {
+      await FriendRequest.deleteOne({ _id: rejectedRequest._id });
+      return res.status(404).json({ error: "Usuario objetivo no encontrado" });
+    }
+
+    const alreadyFriends = (req.user.friends || []).some(
+      (friendId) => friendId.toString() === targetUserId.toString()
+    );
+
+    if (alreadyFriends) {
+      await FriendRequest.deleteOne({ _id: rejectedRequest._id });
+      return res.json({ message: "Ya son amigos", status: "friends" });
+    }
+
+    const requestPermission =
+      targetUser?.privacySettings?.friendRequestPermission || "everyone";
+
+    if (requestPermission === "nobody") {
+      return res.status(403).json({
+        error: "Este usuario no acepta solicitudes de amistad",
+      });
+    }
+
+    if (requestPermission === "friends_of_friends") {
+      const currentFriendIds = new Set(
+        (req.user.friends || []).map((id) => id.toString())
+      );
+      const hasMutualFriend = (targetUser.friends || []).some((id) =>
+        currentFriendIds.has(id.toString())
+      );
+
+      if (!hasMutualFriend) {
+        return res.status(403).json({
+          error: "Este usuario solo acepta solicitudes de amigos de amigos",
+        });
+      }
+    }
+
+    let outgoing = await FriendRequest.findOne({
+      requester: currentUserId,
+      recipient: targetUserId,
+    });
+
+    if (outgoing?.status === "accepted") {
+      await FriendRequest.deleteOne({ _id: rejectedRequest._id });
+      return res.json({ message: "Ya son amigos", status: "friends" });
+    }
+
+    if (outgoing?.status === "pending") {
+      await FriendRequest.deleteOne({ _id: rejectedRequest._id });
+      return res.json({
+        message: "Solicitud ya enviada",
+        status: "pending",
+        request: {
+          id: outgoing._id,
+          status: outgoing.status,
+          createdAt: outgoing.createdAt,
+          respondedAt: outgoing.respondedAt,
+          user: {
+            _id: targetUser._id,
+            username: targetUser.username,
+            fullName: targetUser.fullName,
+            profileImage: targetUser.profileImage,
+          },
+        },
+      });
+    }
+
+    if (outgoing?.status === "rejected") {
+      outgoing.status = "pending";
+      outgoing.respondedAt = null;
+      await outgoing.save();
+    } else if (!outgoing) {
+      outgoing = await FriendRequest.create({
+        requester: currentUserId,
+        recipient: targetUserId,
+      });
+    }
+
+    await FriendRequest.deleteOne({ _id: rejectedRequest._id });
+
+    const io = req.app.get("io");
+    await createUserNotification({
+      recipientId: targetUserId,
+      actorId: currentUserId,
+      type: "friend_request",
+      title: "Nueva solicitud de amistad",
+      body: `${req.user.fullName || req.user.username} quiere conectar contigo`,
+      data: { userId: currentUserId.toString() },
+      io,
+    });
+
+    return res.json({
+      message: "Solicitud enviada",
+      status: "pending",
+      request: {
+        id: outgoing._id,
+        status: outgoing.status,
+        createdAt: outgoing.createdAt,
+        respondedAt: outgoing.respondedAt,
+        user: {
+          _id: targetUser._id,
+          username: targetUser.username,
+          fullName: targetUser.fullName,
+          profileImage: targetUser.profileImage,
+        },
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "No fue posible aceptar el rechazo" });
   }
 };
 
