@@ -311,6 +311,8 @@ export const resetPassword = async (req, res) => {
     user.passwordResetExpires = resetPayload.expires;
     await user.save();
 
+    let emailSent = true;
+
     try {
       await sendPasswordResetEmail({
         to: user.email,
@@ -320,11 +322,21 @@ export const resetPassword = async (req, res) => {
     } catch (mailError) {
       // No rompemos el flujo de recuperación si el proveedor SMTP falla.
       console.error("No fue posible enviar el correo de recuperación:", mailError.message);
+      emailSent = false;
     }
-    
-    res.json({ 
-      message: "Si el email existe, se han enviado las instrucciones"
-    });
+
+    const allowDebugToken = String(process.env.RESET_PASSWORD_DEBUG_TOKEN || "").toLowerCase() === "true";
+    const payload = {
+      message: "Si el email existe, se han enviado las instrucciones",
+      emailSent,
+    };
+
+    if (!emailSent && allowDebugToken) {
+      payload.debugToken = resetPayload.token;
+      payload.message = "No se pudo enviar el correo. Usa el token temporal devuelto por soporte.";
+    }
+
+    res.json(payload);
   } catch (err) {
     console.error("Error en reset password:", err);
     res.status(500).json({ error: "Error interno del servidor" });
